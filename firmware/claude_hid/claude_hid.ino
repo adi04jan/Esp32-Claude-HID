@@ -39,15 +39,33 @@ bool paused = false;
 uint8_t kbd[8] = {0};
 uint8_t mouse[6] = {0};                 // buttons, xLo, xHi, yLo, yHi, wheel
 uint32_t lastCmdMs = 0;
+volatile bool dirtyKbd = false, dirtyMouse = false;  // report state not yet delivered to the PC
+
+// Deliver pending reports. A failed notify (BLE buffers full during an RF fade) stays pending and loop()
+// retries it, so a lost key-up can never leave a key auto-repeating on the PC.
+bool flush() {
+  if (!ready) {
+    dirtyKbd = dirtyMouse = false;  // nothing to deliver to; the PC drops held input on disconnect
+    return false;
+  }
+  if (dirtyKbd && kbdIn->notify(kbd, sizeof(kbd))) dirtyKbd = false;
+  if (dirtyMouse && mouseIn->notify(mouse, sizeof(mouse))) {
+    dirtyMouse = false;
+    mouse[5] = 0;  // wheel is relative: never replay it in later reports
+  }
+  return !dirtyKbd && !dirtyMouse;
+}
 
 void releaseAll() {
+  bool buttons = mouse[0] != 0;
   memset(kbd, 0, sizeof(kbd));
   mouse[0] = 0;
   mouse[5] = 0;
-  if (ready) {
-    kbdIn->notify(kbd, sizeof(kbd));
-    mouseIn->notify(mouse, sizeof(mouse));
-  }
+  dirtyKbd = true;
+  // Only send a mouse report if a button was down: resending the agent's last position would yank the
+  // owner's pointer back (absolute mouse) every time they press the kill switch.
+  if (buttons) dirtyMouse = true;
+  flush();
 }
 
 bool held() {
@@ -69,13 +87,14 @@ class Callbacks : public NimBLEServerCallbacks {
     mouse[5] = 0;
   }
   void onAuthenticationComplete(NimBLEConnInfo& info) override {
-    // One paired PC only: a second bond is deleted and the peer dropped.
-    if (info.isEncrypted() && NimBLEDevice::getNumBonds() <= 1) {
+    // One paired PC only. Input goes only to an encrypted, *bonded* peer while exactly one bond exists:
+    // a device pairing without bonding would otherwise get an encrypted link without adding a bond.
+    if (info.isEncrypted() && info.isBonded() && NimBLEDevice::getNumBonds() == 1) {
       ready = true;
       return;
     }
-    NimBLEDevice::deleteBond(info.getIdAddress());
-    server->disconnect(info);
+    if (info.isEncrypted()) NimBLEDevice::deleteBond(info.getIdAddress());  // a second PC, or no-bond pairing
+    server->disconnect(info);  // failed encryption (e.g. link glitch): drop it but keep the real PC's bond
   }
 };
 
@@ -105,8 +124,8 @@ void handle(const char* line) {
     kbd[0] = a[0];
     kbd[1] = 0;
     for (int i = 0; i < 6; i++) kbd[2 + i] = a[1 + i];
-    kbdIn->notify(kbd, sizeof(kbd));
-    Serial.println("OK");
+    dirtyKbd = true;
+    Serial.println(flush() ? "OK" : "ERR send failed");
   } else if (line[0] == 'M' && sscanf(line + 1, "%d %d %d %d", &a[0], &a[1], &a[2], &a[3]) == 4) {
     if (a[0] < 0 || a[0] > 7 || a[1] < 0 || a[1] > 32767 || a[2] < 0 || a[2] > 32767 || a[3] < -127 || a[3] > 127) {
       Serial.println("ERR bad command");
@@ -118,9 +137,8 @@ void handle(const char* line) {
     mouse[1] = a[1] & 0xFF; mouse[2] = a[1] >> 8;
     mouse[3] = a[2] & 0xFF; mouse[4] = a[2] >> 8;
     mouse[5] = (uint8_t)(int8_t)a[3];
-    mouseIn->notify(mouse, sizeof(mouse));
-    mouse[5] = 0;  // wheel is relative: never replay it in later reports
-    Serial.println("OK");
+    dirtyMouse = true;
+    Serial.println(flush() ? "OK" : "ERR send failed");
   } else {
     Serial.println("ERR bad command");
   }
@@ -187,6 +205,8 @@ void loop() {
       releaseAll();
     }
   }
+
+  if (dirtyKbd || dirtyMouse) flush();  // retry reports a congested link refused
 
   // Stuck-input guard: nothing may stay held through serial silence.
   if (held() && millis() - lastCmdMs > GUARD_MS) releaseAll();

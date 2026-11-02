@@ -1,9 +1,13 @@
 """Pure-Python checks for the host side (no hardware). Run: python -m pytest tests -v"""
 import asyncio
 import json
+import math
+import subprocess
 import sys
+import time
 from pathlib import Path
 
+import anyio
 import cv2
 import numpy as np
 import pytest
@@ -11,7 +15,8 @@ import serial
 from mcp.server.mcpserver.exceptions import ToolError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "host"))
-from camera import Camera, CameraError, screen_matrix, shot_size, zoom_matrix  # noqa: E402
+import camera  # noqa: E402
+from camera import Camera, CameraError, screen_matrix, shot_size, zoom_matrix, zoom_scale  # noqa: E402
 from hidlink import HidError, HidLink, char_to_key, parse_combo, to_abs  # noqa: E402
 import server  # noqa: E402
 from server import shot_to_frac  # noqa: E402
@@ -79,7 +84,7 @@ def test_non_ascii_rejected_before_typing():
 
 def test_kill_switch_mid_typing_stops_and_releases():
     ser = FakeSerial(replies=[b"OK\n", b"OK\n", b"ERR paused\n"])
-    with pytest.raises(HidError, match="kill switch"):
+    with pytest.raises(HidError, match=r"kill switch.*typed 1 of 3"):
         HidLink("X", 0, ser).type_text("abc")
     assert ser.lines == ["K 0 4 0 0 0 0 0", "K 0 0 0 0 0 0 0", "K 0 5 0 0 0 0 0", "R"]
 
@@ -99,7 +104,8 @@ def test_click_sends_absolute_position():
 
 def test_shot_size():
     assert shot_size(1280, (1920, 1080)) == (1280, 720)
-    assert shot_size(1280, (1280, 1024)) == (1280, 1024)
+    w, h = shot_size(1280, (1280, 1024))  # 5:4 would be 1.31 MP at 1280 wide: too big, the model would downscale it
+    assert w * h <= 1_150_000 and abs(w / h - 1.25) < 0.01
 
 
 def test_screen_matrix_maps_corners():
@@ -154,3 +160,76 @@ def test_click_before_calibration_sends_nothing(tmp_path):
     with pytest.raises(ToolError, match="calibrate"):
         asyncio.run(server.mcp.call_tool("click", {"x": 10, "y": 10}))
     assert ser.lines == []
+
+
+def test_abort_stops_typing_and_releases():
+    ser = FakeSerial()
+    link = HidLink("X", 0, ser)
+    write = ser.write
+
+    def write_then_cancel(b):  # the client cancels right after the first key goes down
+        write(b)
+        if len(ser.lines) == 1:
+            link.abort.set()
+
+    ser.write = write_then_cancel
+    with pytest.raises(HidError, match=r"cancelled.*typed 0 of 3"):
+        link.type_text("abc")
+    assert ser.lines == ["K 0 4 0 0 0 0 0", "R"]
+
+
+def test_cancelled_tool_stops_typing():
+    # Esc in Claude Code (or session end) cancels the tool call; the keystrokes must stop too.
+    ser = FakeSerial()
+    server.hid = HidLink("X", 0.01, ser)
+
+    async def call():
+        with anyio.move_on_after(0.1):
+            await server.mcp.call_tool("type_text", {"text": "a" * 200})
+
+    anyio.run(call)
+    time.sleep(0.2)  # let the worker thread reach its next report
+    assert ser.lines[-1] == "R" and len(ser.lines) < 60
+
+
+def test_no_calibration_opens_no_camera(tmp_path, monkeypatch):
+    # Without a calibration we don't know which camera watches the screen; index 0 is usually the user's face.
+    monkeypatch.setattr(camera, "open_capture", lambda *a: pytest.fail("opened a camera without calibration"))
+    cam = Camera(CFG, tmp_path / "none.json", tmp_path)
+    with pytest.raises(CameraError, match="calibrate"):
+        cam.start()
+    with pytest.raises(CameraError, match="calibrate"):
+        cam.screenshot()
+
+
+def test_zoom_scale_respects_pixel_budget():
+    assert zoom_scale(320, 180) == 4.0
+    s = zoom_scale(100, 100)
+    assert (100 * s) ** 2 <= 1_150_000
+
+
+def test_recording_survives_hard_kill(tmp_path):
+    # Claude Code may TerminateProcess the server: the segment being written must still play.
+    child = chr(10).join([
+        "import sys, time, pathlib, numpy as np",
+        "sys.path.insert(0, sys.argv[1])",
+        "from camera import open_writer",
+        "w, path = open_writer(pathlib.Path(sys.argv[2]), 5, (1280, 720))",
+        "print(path, flush=True)",
+        "for i in range(25): w.write(np.random.randint(0, 255, (720, 1280, 3), np.uint8))  # camera-like, incompressible",
+        "print('written', flush=True)",
+        "time.sleep(30)",
+    ])
+    p = subprocess.Popen([sys.executable, "-c", child, str(Path(camera.__file__).parent), str(tmp_path)],
+                         stdout=subprocess.PIPE, text=True)
+    path = p.stdout.readline().strip()
+    p.stdout.readline()
+    time.sleep(0.5)
+    p.kill()
+    p.wait()
+    cap = cv2.VideoCapture(path)
+    frames = 0
+    while cap.read()[0]:
+        frames += 1
+    cap.release()
+    assert frames >= 15

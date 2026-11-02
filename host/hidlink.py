@@ -25,7 +25,10 @@ BUTTONS = {"left": 1, "right": 2, "middle": 4}
 ERRORS = {
     "paused": "paused: the user pressed the kill switch on the ESP32. Stop and wait for them to resume; don't retry.",
     "not connected": "not connected: pair 'Claude HID' on the offline PC (or it's out of range).",
+    "send failed": ("send failed: the Bluetooth link is congested or fading, so the last key or click may not have "
+                    "registered. Take a screenshot and check before continuing."),
 }
+MAX_TYPE = 2000  # one call stays short enough to interrupt and check
 
 # US layout: char -> (modifier, keycode)
 KEYS = {"\n": (0, 0x28), "\t": (0, 0x2B), " ": (0, 0x2C)}
@@ -75,7 +78,9 @@ def to_abs(frac: float) -> int:
 class HidLink:
     def __init__(self, port: str, key_delay: float = 0.012, ser=None):
         self.port, self.key_delay, self._ser = port, key_delay, ser
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()  # one serial command at a time
+        self._action_lock = threading.Lock()  # one multi-report action at a time: no interleaving
+        self.abort = threading.Event()  # set when the client cancels the tool call
         self._x = self._y = 0
 
     def _open(self):
@@ -132,26 +137,40 @@ class HidLink:
 
     @contextmanager
     def _action(self):
-        try:
-            yield
-        except HidError:
+        with self._action_lock:
+            self.abort.clear()
             try:
-                self.cmd("R")
-            except Exception:
-                pass
-            raise
+                yield
+            except HidError:
+                try:
+                    self.cmd("R")
+                except Exception:
+                    pass
+                raise
+
+    def _report(self, line: str) -> None:
+        if self.abort.is_set():
+            raise HidError("cancelled: the tool call was interrupted; input released")
+        self.cmd(line)
 
     def _tap(self, mod: int, key: int) -> None:
-        self.cmd(f"K {mod} {key} 0 0 0 0 0")
+        self._report(f"K {mod} {key} 0 0 0 0 0")
         time.sleep(self.key_delay)
-        self.cmd("K 0 0 0 0 0 0 0")
+        self._report("K 0 0 0 0 0 0 0")
         time.sleep(self.key_delay)
 
     def type_text(self, text: str) -> None:
+        if len(text) > MAX_TYPE:
+            raise ValueError(f"send at most {MAX_TYPE} characters per call; split longer text and check each part")
         keys = [char_to_key(c) for c in text.replace("\r\n", "\n")]  # validate everything before typing anything
         with self._action():
-            for mod, key in keys:
-                self._tap(mod, key)
+            done = 0
+            try:
+                for mod, key in keys:
+                    self._tap(mod, key)
+                    done += 1
+            except HidError as e:
+                raise HidError(f"{e} (typed {done} of {len(keys)} characters)") from e
 
     def key(self, combo: str, repeat: int = 1) -> None:
         if not 1 <= repeat <= 200:
@@ -162,7 +181,7 @@ class HidLink:
                 self._tap(mod, key)
 
     def _mouse(self, buttons: int, wheel: int = 0) -> None:
-        self.cmd(f"M {buttons} {self._x} {self._y} {wheel}")
+        self._report(f"M {buttons} {self._x} {self._y} {wheel}")
 
     def _goto(self, fx: float, fy: float) -> None:
         self._x, self._y = to_abs(fx), to_abs(fy)

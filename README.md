@@ -38,7 +38,8 @@ arduino-cli upload  -p COM31 --fqbn esp32:esp32:esp32c3:CDCOnBoot=cdc firmware/c
 On the offline PC: **Settings → Bluetooth & devices → Add device → Bluetooth → "Claude HID"**.
 Check with `python host/hidlink.py status`, which should show `connected=True bonded=True`.
 
-The board accepts **one PC only**. To move it to another PC:
+The board accepts **one PC only**. If it was ever paired with another PC (e.g. during testing), run
+`forget` first, or the new PC will pair and immediately disconnect. To move it to another PC:
 
 ```
 python host/hidlink.py forget        # board forgets the old PC
@@ -57,6 +58,9 @@ python host/camera.py calibrate --camera 1 --screen 1920x1080  # offline PC's re
 Click the screen's four corners in the order **top-left, top-right, bottom-right, bottom-left**. Press
 `r` to restart and **Enter** to save. A flattened preview appears; check it shows the whole screen.
 Close Claude Code first, because only one program can use the webcam at a time.
+
+Until you calibrate, the server opens **no** camera at all. It won't guess an index, because index 0 is
+usually the laptop's own face camera.
 
 ## 6. Use it from Claude Code
 
@@ -88,12 +92,17 @@ Opening the serial port doesn't reset the board.
 
 ## 8. Recordings
 
-Every session is recorded to `recordings/YYYYmmdd-HHMMSS.mp4`: the flattened screen at 5 fps, in
-10-minute files. Play them in VLC. Settings are in `host/config.json`.
+Every session is recorded to `recordings/YYYYmmdd-HHMMSS.mkv`: the flattened screen at 5 fps, in
+10-minute files. Matroska stays playable even if the server is killed mid-session; at most the last
+second or two is lost. Play them in VLC. Settings are in `host/config.json`.
 
 ## 9. Troubleshooting
 
 - **"not connected"**: the offline PC is off or asleep, out of range, or not paired. Check the LED.
+- **Pairs, then disconnects at once**: the board is still bonded to a different PC. Run
+  `python host/hidlink.py forget`, remove "Claude HID" on both PCs, then pair again.
+- **`hidlink.py` says "Access is denied"**: a Claude session holds COM31. Close it, or use the `status` tool.
+- **"send failed"**: the Bluetooth link is congested or weak. The board keeps retrying; move it closer.
 - **"camera not calibrated"**: run step 5. This also happens if the webcam's resolution changed.
 - **Webcam plugged in after Claude started**: run `/mcp` in Claude Code and reconnect `desktop-hid`.
 - **Missing or doubled characters**: raise `key_delay_ms` in `host/config.json` (default 12).

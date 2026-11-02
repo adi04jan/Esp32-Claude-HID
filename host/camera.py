@@ -4,8 +4,9 @@ CLI: python host/camera.py list
      python host/camera.py calibrate --camera N --screen 1920x1080
 """
 import argparse
-import os
 import json
+import math
+import os
 import threading
 import time
 from pathlib import Path
@@ -19,6 +20,9 @@ CONFIG = HERE / "config.json"
 CALIB = HERE / "calibration.json"
 REC_DIR = HERE.parent / "recordings"
 STALE_S = 2.0  # a frame older than this means the camera stopped; never serve it
+MAX_PIXELS = 1_150_000  # larger images get downscaled by the model API, which would skew click coordinates
+NOT_CALIBRATED = ("camera not calibrated for this setup: run python host/camera.py calibrate --camera N --screen WxH "
+                  "(stop the Claude session first; the camera can only be opened by one program)")
 
 
 class CameraError(RuntimeError):
@@ -27,7 +31,8 @@ class CameraError(RuntimeError):
 
 def shot_size(shot_width: int, screen) -> tuple[int, int]:
     sw, sh = screen
-    return shot_width, round(shot_width * sh / sw)
+    s = min(shot_width / sw, math.sqrt(MAX_PIXELS / (sw * sh)))
+    return round(sw * s), round(sh * s)
 
 
 def screen_matrix(corners, size) -> np.ndarray:
@@ -42,6 +47,16 @@ def zoom_matrix(M, x, y, w, h, scale) -> np.ndarray:
     S = np.array([[scale, 0, 0], [0, scale, 0], [0, 0, 1]], dtype=float)
     T = np.array([[1, 0, -x], [0, 1, -y], [0, 0, 1]], dtype=float)
     return S @ T @ M
+
+
+def zoom_scale(w: int, h: int) -> float:
+    return min(1280 / max(w, h), math.sqrt(MAX_PIXELS / (w * h)))
+
+
+def open_writer(rec_dir: Path, fps: float, size) -> tuple[cv2.VideoWriter, Path]:
+    rec_dir.mkdir(parents=True, exist_ok=True)
+    path = rec_dir / time.strftime("%Y%m%d-%H%M%S.mkv")  # Matroska stays playable if the process is killed
+    return cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, size), path
 
 
 def load_calibration(path: Path) -> dict | None:
@@ -62,7 +77,7 @@ class Camera:
     def __init__(self, cfg: dict, calib_path: Path, rec_dir: Path):
         self.cfg, self.calib_path, self.rec_dir = cfg, Path(calib_path), Path(rec_dir)
         self.calib = load_calibration(self.calib_path)
-        self.index = self.calib["camera"] if self.calib else 0
+        self.index = self.calib["camera"] if self.calib else None
         self._M = screen_matrix(self.calib["corners"], self._calib_size()) if self.calib else None
         self._frame, self._frame_t = None, 0.0
         self._lock = threading.Lock()
@@ -89,10 +104,11 @@ class Camera:
         return shot_size(self.cfg["shot_width"], (f.shape[1], f.shape[0]) if f is not None else (16, 9))
 
     def require_calibrated(self) -> None:
-        if not self.calibrated:
-            raise CameraError(
-                "camera not calibrated for this setup — run: python host/camera.py calibrate --camera N --screen WxH "
-                "(stop the Claude session first; the camera can only be opened by one program)")
+        if self.calibrated:
+            return
+        if self._frame is None and self.error:
+            raise CameraError(self.error)  # camera down or never started: say why, not "recalibrate"
+        raise CameraError(NOT_CALIBRATED)
 
     def _matrix(self, f) -> np.ndarray:
         if self._calibrated_for(f):
@@ -121,12 +137,16 @@ class Camera:
         if not (w >= 8 and h >= 8 and x >= 0 and y >= 0 and x + w <= W and y + h <= H):
             raise ValueError(f"zoom region must lie inside the {W}x{H} screenshot, width and height >= 8")
         f = self.latest()
-        s = 1280 / max(w, h)
+        s = zoom_scale(w, h)
         Z = zoom_matrix(self._matrix(f), x, y, w, h, s)
         return cv2.warpPerspective(f, Z, (round(w * s), round(h * s)), flags=cv2.INTER_CUBIC), s
 
     def start(self) -> None:
-        w, h = self.calib["camera_size"] if self.calib else (self.cfg["camera_width"], self.cfg["camera_height"])
+        if not self.calib:
+            # Don't guess a camera: index 0 is usually the user's face cam, and we'd record it.
+            self.error = NOT_CALIBRATED
+            raise CameraError(self.error)
+        w, h = self.calib["camera_size"]
         try:
             self._cap = open_capture(self.index, w, h)
         except CameraError as e:
@@ -168,9 +188,7 @@ class Camera:
         # New file per segment so a killed process loses at most one segment's footer.
         if self._writer is None or now - self._seg_start >= seg or size != self._wsize:
             self._close_writer()
-            self.rec_dir.mkdir(parents=True, exist_ok=True)
-            path = self.rec_dir / time.strftime("%Y%m%d-%H%M%S.mp4")
-            self._writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), self.cfg["record_fps"], size)
+            self._writer, path = open_writer(self.rec_dir, self.cfg["record_fps"], size)
             self._wsize, self._seg_start, self.recording = size, now, path
         self._writer.write(img)
 

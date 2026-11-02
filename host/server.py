@@ -2,12 +2,14 @@
 
 Run by Claude Code via .mcp.json (stdio). Never print to stdout here: stdout is the MCP channel.
 """
+import functools
 import json
 import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Literal
 
+import anyio
 import cv2
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -68,6 +70,16 @@ def _frac(x: int, y: int) -> tuple[float, float]:
     return shot_to_frac(x, y, cam.size)
 
 
+async def _hid(fn, *args, **kwargs):
+    """Run a HID action off the event loop. If the client cancels the call (Esc, session end), stop typing or
+    clicking at the next report instead of finishing the action in the background."""
+    try:
+        return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs), abandon_on_cancel=True)
+    except anyio.get_cancelled_exc_class():
+        hid.abort.set()
+        raise
+
+
 def _jpeg(img) -> Image:
     ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 80])
     if not ok:
@@ -95,50 +107,50 @@ def zoom(x: int, y: int, width: int, height: int) -> list:
 
 
 @mcp.tool()
-def click(x: int, y: int, button: Literal["left", "right", "middle"] = "left", double: bool = False) -> str:
+async def click(x: int, y: int, button: Literal["left", "right", "middle"] = "left", double: bool = False) -> str:
     """Click at screenshot pixel (x, y)."""
     with errors():
-        hid.click(*_frac(x, y), button=button, double=double)
+        await _hid(hid.click, *_frac(x, y), button=button, double=double)
         return "ok"
 
 
 @mcp.tool()
-def move(x: int, y: int) -> str:
+async def move(x: int, y: int) -> str:
     """Move the pointer to screenshot pixel (x, y) without clicking (hover)."""
     with errors():
-        hid.move(*_frac(x, y))
+        await _hid(hid.move, *_frac(x, y))
         return "ok"
 
 
 @mcp.tool()
-def drag(x1: int, y1: int, x2: int, y2: int) -> str:
+async def drag(x1: int, y1: int, x2: int, y2: int) -> str:
     """Left-button drag from (x1, y1) to (x2, y2), in screenshot pixels."""
     with errors():
-        hid.drag(*_frac(x1, y1), *_frac(x2, y2))
+        await _hid(hid.drag, *_frac(x1, y1), *_frac(x2, y2))
         return "ok"
 
 
 @mcp.tool()
-def scroll(x: int, y: int, direction: Literal["up", "down"], clicks: int = 3) -> str:
+async def scroll(x: int, y: int, direction: Literal["up", "down"], clicks: int = 3) -> str:
     """Scroll the mouse wheel over screenshot pixel (x, y). One click is about 3 lines."""
     with errors():
-        hid.scroll(*_frac(x, y), clicks if direction == "up" else -clicks)
+        await _hid(hid.scroll, *_frac(x, y), clicks if direction == "up" else -clicks)
         return "ok"
 
 
 @mcp.tool()
-def type_text(text: str) -> str:
-    """Type ASCII text on the offline PC (US layout). Newlines press Enter, tabs press Tab."""
+async def type_text(text: str) -> str:
+    """Type ASCII text on the offline PC (US layout, max 2000 characters per call). Newlines press Enter."""
     with errors():
-        hid.type_text(text)
+        await _hid(hid.type_text, text)
         return f"typed {len(text)} characters"
 
 
 @mcp.tool()
-def key(combo: str, repeat: int = 1) -> str:
+async def key(combo: str, repeat: int = 1) -> str:
     """Press a key or combo, e.g. "enter", "ctrl+s", "ctrl+shift+esc", "win+r", "alt+tab", "f5", "down"."""
     with errors():
-        hid.key(combo, repeat)
+        await _hid(hid.key, combo, repeat)
         return "ok"
 
 
