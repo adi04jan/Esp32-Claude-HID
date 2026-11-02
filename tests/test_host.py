@@ -1,12 +1,18 @@
 """Pure-Python checks for the host side (no hardware). Run: python -m pytest tests -v"""
+import json
 import sys
 from pathlib import Path
 
+import cv2
+import numpy as np
 import pytest
 import serial
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "host"))
+from camera import Camera, CameraError, screen_matrix, shot_size, zoom_matrix  # noqa: E402
 from hidlink import HidError, HidLink, char_to_key, parse_combo, to_abs  # noqa: E402
+
+CFG = json.loads((Path(__file__).resolve().parent.parent / "host" / "config.json").read_text())
 
 
 class FakeSerial:
@@ -85,3 +91,33 @@ def test_click_sends_absolute_position():
     ser = FakeSerial()
     HidLink("X", 0, ser).click(0.5, 1.0)
     assert ser.lines == ["M 0 16384 32767 0", "M 1 16384 32767 0", "M 0 16384 32767 0"]
+
+
+def test_shot_size():
+    assert shot_size(1280, (1920, 1080)) == (1280, 720)
+    assert shot_size(1280, (1280, 1024)) == (1280, 1024)
+
+
+def test_screen_matrix_maps_corners():
+    c = [[100, 50], [900, 80], [880, 600], [120, 560]]
+    out = cv2.perspectiveTransform(np.float32([c]), screen_matrix(c, (1280, 720)))[0]
+    assert np.allclose(out, [[0, 0], [1279, 0], [1279, 719], [0, 719]], atol=1e-3)
+
+
+def test_zoom_matrix_maps_region_to_output():
+    c = [[0, 0], [1279, 0], [1279, 719], [0, 719]]
+    M = screen_matrix(c, (1280, 720))
+    Z = zoom_matrix(M, 100, 200, 320, 180, 4.0)
+    out = cv2.perspectiveTransform(np.float32([[[100, 200], [420, 380]]]), Z)[0]
+    assert np.allclose(out, [[0, 0], [1280, 720]], atol=1e-3)
+
+
+def test_calibration_from_other_camera_size_is_rejected(tmp_path):
+    p = tmp_path / "cal.json"
+    p.write_text(json.dumps({"camera": 1, "camera_size": [1280, 720], "screen": [1920, 1080],
+                             "corners": [[0, 0], [1279, 0], [1279, 719], [0, 719]]}))
+    cam = Camera(CFG, p, tmp_path)
+    cam._frame = np.zeros((1080, 1920, 3), np.uint8)
+    assert not cam.calibrated
+    with pytest.raises(CameraError, match="calibrate"):
+        cam.require_calibrated()
