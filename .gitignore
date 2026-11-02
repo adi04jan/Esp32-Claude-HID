@@ -1,0 +1,4 @@
+host/calibration.json
+recordings/
+__pycache__/
+.pytest_cache/
