@@ -1,0 +1,9 @@
+{
+  "port": "COM31",
+  "key_delay_ms": 12,
+  "camera_width": 1920,
+  "camera_height": 1080,
+  "shot_width": 1280,
+  "record_fps": 5,
+  "record_segment_min": 10
+}
