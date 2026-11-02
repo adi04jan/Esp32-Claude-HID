@@ -1,4 +1,5 @@
 """Pure-Python checks for the host side (no hardware). Run: python -m pytest tests -v"""
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -7,10 +8,13 @@ import cv2
 import numpy as np
 import pytest
 import serial
+from mcp.server.mcpserver.exceptions import ToolError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "host"))
 from camera import Camera, CameraError, screen_matrix, shot_size, zoom_matrix  # noqa: E402
 from hidlink import HidError, HidLink, char_to_key, parse_combo, to_abs  # noqa: E402
+import server  # noqa: E402
+from server import shot_to_frac  # noqa: E402
 
 CFG = json.loads((Path(__file__).resolve().parent.parent / "host" / "config.json").read_text())
 
@@ -121,3 +125,32 @@ def test_calibration_from_other_camera_size_is_rejected(tmp_path):
     assert not cam.calibrated
     with pytest.raises(CameraError, match="calibrate"):
         cam.require_calibrated()
+
+
+def test_shot_to_frac():
+    assert shot_to_frac(0, 0, (1280, 720)) == (0.0, 0.0)
+    assert shot_to_frac(1279, 719, (1280, 720)) == (1.0, 1.0)
+    with pytest.raises(ValueError, match="inside the screenshot"):
+        shot_to_frac(1280, 10, (1280, 720))
+
+
+def test_tools_registered():
+    names = {t.name for t in asyncio.run(server.mcp.list_tools())}
+    assert names == {"screenshot", "zoom", "click", "move", "drag", "scroll", "type_text", "key", "status"}
+
+
+def test_tool_errors_reach_the_agent():
+    # mcp 2.x masks unexpected exceptions; our messages must arrive as ToolError text.
+    server.hid = HidLink("X", 0, FakeSerial())
+    with pytest.raises(ToolError, match="foo"):
+        asyncio.run(server.mcp.call_tool("key", {"combo": "ctrl+foo"}))
+
+
+def test_click_before_calibration_sends_nothing(tmp_path):
+    ser = FakeSerial()
+    server.hid = HidLink("X", 0, ser)
+    server.cam = Camera(CFG, tmp_path / "none.json", tmp_path)
+    server.cam._frame = np.zeros((1080, 1920, 3), np.uint8)
+    with pytest.raises(ToolError, match="calibrate"):
+        asyncio.run(server.mcp.call_tool("click", {"x": 10, "y": 10}))
+    assert ser.lines == []

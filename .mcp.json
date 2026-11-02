@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "desktop-hid": {
+      "command": "python",
+      "args": ["host/server.py"]
+    }
+  }
+}
