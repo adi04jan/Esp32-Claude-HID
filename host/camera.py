@@ -258,7 +258,7 @@ def cmd_calibrate(cfg: dict, index: int, screen: tuple[int, int]) -> None:
 
 def main() -> None:
     cfg = json.loads(CONFIG.read_text())
-    ap = argparse.ArgumentParser(description="Camera tools for the Claude HID setup.")
+    ap = argparse.ArgumentParser(description="Camera tools for the ABKey HID setup.")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list", help="show which camera indexes open")
     c = sub.add_parser("calibrate", help="click the offline screen's corners")

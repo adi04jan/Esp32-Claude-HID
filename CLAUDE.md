@@ -19,3 +19,14 @@ flash, erase or monitor any port other than the project board.**
 - COM numbers can change after replugging. Before flashing, confirm the MAC is `a0:85:e3:4e:4f:bc`
   (`esptool --port COMxx read-mac`); if it doesn't match, stop and ask the user.
 - Host code must take the port from config/argument, never scan for Espressif VIDs.
+
+## Working on this repo
+
+- BLE name: **ABKey HID**. The board pairs with one PC only; `python host/hidlink.py forget` releases it.
+- Layout: `firmware/claude_hid/` (sketch), `host/hidlink.py` (serial + keymap), `host/camera.py`
+  (capture/calibrate/record), `host/server.py` (MCP server + agent guide in `GUIDE`), `tests/test_host.py`.
+- Tests (no hardware): `python -m pytest tests -q`. Build/flash steps: README section 3 (MAC check first).
+- Local-only, never commit: `host/calibration.json`, `recordings/` (both gitignored).
+- mcp is pinned to 2.x (`MCPServer`); tool errors must be raised as `ToolError` or the agent sees no message.
+- Absolute mouse reaches only Windows' main display. Hardware tests must keep all input on the display the
+  camera watches, inside a window you control.

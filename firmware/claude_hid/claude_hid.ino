@@ -1,4 +1,4 @@
-// Claude HID: BLE keyboard + absolute mouse, driven by line commands over USB serial.
+// ABKey HID: BLE keyboard + absolute mouse, driven by line commands over USB serial.
 // The firmware is a dumb report forwarder; all key maps and scaling live on the host.
 //
 // Protocol (one reply line per command, decimal numbers):
@@ -151,7 +151,7 @@ void setup() {
   prefs.begin("hid", false);
   paused = prefs.getBool("paused", false);  // a reset must not silently un-pause
 
-  NimBLEDevice::init("Claude HID");
+  NimBLEDevice::init("ABKey HID");
   NimBLEDevice::setSecurityAuth(true, false, true);
   NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
   server = NimBLEDevice::createServer();
@@ -159,7 +159,7 @@ void setup() {
   server->advertiseOnDisconnect(true);
 
   NimBLEHIDDevice* hid = new NimBLEHIDDevice(server);
-  hid->setManufacturer("Claude HID");
+  hid->setManufacturer("ABKey HID");
   hid->setPnp(0x02, 0x303A, 0x8001, 0x0100);
   hid->setHidInfo(0x00, 0x01);
   hid->setReportMap((uint8_t*)REPORT_MAP, sizeof(REPORT_MAP));
@@ -171,7 +171,7 @@ void setup() {
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
   adv->setAppearance(0x03C1);  // keyboard
   adv->addServiceUUID(hid->getHidService()->getUUID());
-  adv->setName("Claude HID");
+  adv->setName("ABKey HID");
   adv->start();
 }
 

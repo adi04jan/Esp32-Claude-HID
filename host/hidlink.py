@@ -24,7 +24,7 @@ NAMED = {
 BUTTONS = {"left": 1, "right": 2, "middle": 4}
 ERRORS = {
     "paused": "paused: the user pressed the kill switch on the ESP32. Stop and wait for them to resume; don't retry.",
-    "not connected": "not connected: pair 'Claude HID' on the offline PC (or it's out of range).",
+    "not connected": "not connected: pair 'ABKey HID' on the offline PC (or it's out of range).",
     "send failed": ("send failed: the Bluetooth link is congested or fading, so the last key or click may not have "
                     "registered. Take a screenshot and check before continuing."),
 }
@@ -237,7 +237,7 @@ class HidLink:
 
 def main() -> None:
     cfg = json.loads(CONFIG.read_text())
-    ap = argparse.ArgumentParser(description="Talk to the Claude HID ESP32 bridge.")
+    ap = argparse.ArgumentParser(description="Talk to the ABKey HID ESP32 bridge.")
     ap.add_argument("--port", default=cfg["port"])
     ap.add_argument("action", choices=["status", "forget", "release", "raw"])
     ap.add_argument("line", nargs="?", help="raw protocol line, e.g. \"M 0 16384 16384 0\"")
@@ -248,7 +248,7 @@ def main() -> None:
             print(" ".join(f"{k}={v}" for k, v in link.status().items()))
         elif a.action == "forget":
             link.forget()
-            print("Forgot the paired PC. Also remove 'Claude HID' in that PC's Bluetooth settings before re-pairing.")
+            print("Forgot the paired PC. Also remove 'ABKey HID' in that PC's Bluetooth settings before re-pairing.")
         elif a.action == "release":
             link.release()
             print("released")
